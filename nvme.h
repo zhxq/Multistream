@@ -227,22 +227,6 @@ struct nvme_fault_inject {
 #endif
 };
 
-struct nvme_user_io {
-	__u8	opcode;
-	__u8	flags;
-	__u16	control;
-	__u16	nblocks;
-	__u16	rsvd;
-	__u64	metadata;
-	__u64	addr;
-	__u64	slba;
-	__u32	dsmgmt;
-	__u32	reftag;
-	__u16	apptag;
-	__u16	appmask;
-};
-
-
 struct nvme_ctrl {
 	bool comp_seen;
 	enum nvme_ctrl_state state;

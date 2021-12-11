@@ -1,5 +1,5 @@
 /*
- * Adapted from https://github.com/ilammy/ftrace-hook
+ * Adapted from https://github.com/ilammy/ftrace-hook for hook management part.
  */
 
 #define pr_fmt(fmt) "ftrace_hook: " fmt
@@ -15,11 +15,132 @@
 #include <linux/version.h>
 #include <linux/kprobes.h>
 #include <linux/blkdev.h>
+#include <linux/nvme_ioctl.h>
+#include <linux/nvme.h>
+#include <linux/moduleparam.h>
 #include "nvme.h"
+
+// Uncomment the following line to enable logging to dmesg.
+//#define DEBUG_MODULE
+
+#ifdef DEBUG_MODULE
+#define printdbg(fmt, ...) \
+    do { printk(fmt, ## __VA_ARGS__); } while (0)
+#define printwmodname(fmt, ...) \
+    do { pr_info(fmt, ## __VA_ARGS__); } while (0)
+#else
+#define printdbg(fmt, ...) \
+    do { } while (0)
+#define printwmodname(fmt, ...) \
+    do { } while (0)
+#endif
 
 MODULE_DESCRIPTION("Block IO Stream ID Tagger");
 MODULE_AUTHOR("Xiangqun Zhang <xzhang84@syr.edu>");
 MODULE_LICENSE("GPL");
+
+// Handle streams argument
+// Takes a list like "proc1,proc2;proc3"
+//   which will assign I/O from proc1 and proc2 to stream 2
+//   and proc3 to stream 3. Stream ID starts from 2 as defined by Linux kernel.
+static char* streams = NULL;
+static int arg_streams = 0;
+static int* arg_stream_processes;
+static char*** streamlist = NULL;
+
+static int streams_set(const char *oldval, const struct kernel_param *kp)
+{
+    char* val;
+	int i;
+	int j;
+	int streamc = 1;
+	int processes = 1;
+    val = kmalloc(strlen(oldval) + 1, GFP_KERNEL);
+	streams = kmalloc(strlen(oldval) + 1, GFP_KERNEL);
+    strcpy(val, oldval);
+	strcpy(streams, oldval);
+	for (i = 0; i < arg_streams; i++){
+		for (j = 0; j < arg_stream_processes[i]; j++){
+			kfree(streamlist[i][j]);
+		}
+		kfree(streamlist[i]);
+	}
+	kfree(arg_stream_processes);
+	kfree(streamlist);
+
+	char* tmpstream = val;
+	char* tmpprocess;
+    char* tmpstream_r = val;
+    char* tmpprocess_r;
+
+	// count how many streams we need here
+	for (i = 0; val[i] != '\0'; i++){
+		if (val[i] == ';'){
+			streamc++;
+		}
+	}
+	streamlist = kmalloc_array(streamc, sizeof(char**), GFP_KERNEL);
+    arg_streams = streamc;
+    arg_stream_processes = kmalloc(sizeof(int) * streamc, GFP_KERNEL);
+
+	streamc = 0;
+	while ((tmpstream = strsep(&tmpstream_r, ";"))) {
+        printdbg("Stream: %d\n", streamc + 1);
+        printdbg("Info: %s\n", tmpstream);
+		processes = 1;
+		for (i = 0; tmpstream[i] != '\0'; i++){
+			if (tmpstream[i] == ','){
+				processes++;
+			}
+		}
+		streamlist[streamc] = kmalloc_array(processes, sizeof(char*), GFP_KERNEL);
+        arg_stream_processes[streamc] = processes;
+		processes = 0;
+		tmpprocess = tmpstream;
+		tmpprocess_r = tmpstream;
+		while ((tmpprocess = strsep(&tmpprocess_r, ","))) {
+            printdbg("  Process: %d\n", processes + 1);
+            printdbg("  Name: %s\n", tmpprocess);
+			streamlist[streamc][processes] = kmalloc(strlen(tmpprocess) + 1, GFP_KERNEL);
+			strcpy(streamlist[streamc][processes], tmpprocess);
+			processes++;
+		}
+		streamc++;
+	}
+	kfree(val);
+	return 0;
+}
+
+// Find stream ID by process name
+static int find_stream(const char* process_name){
+    int i, j;
+    printdbg("Total streams: %d\n", arg_streams);
+    printdbg("Finding %s\n", process_name);
+    for (i = 0; i < arg_streams; i++){
+        printdbg("Stream %d has %d processes\n", i + 2, arg_stream_processes[i]);
+        for (j = 0; j < arg_stream_processes[i]; j++){
+            printdbg("  Comparing to: %s\n", streamlist[i][j]);
+            if (strcmp(streamlist[i][j], process_name) == 0){
+                return i + 2;
+            }
+        }
+    }
+    return 0;
+}
+ 
+static int stream_get(char* buffer, const struct kernel_param *kp){
+	if (streams == NULL) return 0;
+	strcpy(buffer, streams);
+	return strlen(buffer);
+}
+
+static const struct kernel_param_ops param_ops_streams = {
+	.set	= streams_set,
+	.get	= stream_get,
+};
+
+module_param_cb(streams, &param_ops_streams, NULL, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(streams, "Process name list for streams, starting with stream 2. Example: \"a,b,c;d;e,f;g\" means stream 2 for process a,b and c; stream 3 for d; stream 4 for e,f and stream 5 for g. Process not on this list will be not assigned to any stream. Both stream ID = 0 and 1 will not be passed to the device as defined in Linux Kernel.");
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,7,0)
 static unsigned long lookup_name(const char *name)
@@ -225,11 +346,7 @@ void fh_remove_hooks(struct ftrace_hook *hooks, size_t count)
 #ifndef CONFIG_X86_64
 #error Currently only x86_64 architecture is supported
 #endif
-/*
-#if defined(CONFIG_X86_64) && (LINUX_VERSION_CODE >= KERNEL_VERSION(4,17,0))
-#define PTREGS_SYSCALL_STUBS 1
-#endif
-*/
+
 /*
  * Tail call optimization can interfere with recursion detection based on
  * return address on the stack. Disable it to avoid machine hangups.
@@ -238,83 +355,23 @@ void fh_remove_hooks(struct ftrace_hook *hooks, size_t count)
 #pragma GCC optimize("-fno-optimize-sibling-calls")
 #endif
 
-#ifdef PTREGS_SYSCALL_STUBS
-static asmlinkage long (*real_blk_account_io_start)(struct pt_regs *regs);
-
-static asmlinkage long fh_blk_account_io_start(struct pt_regs *regs)
-{
-	long ret;
-
-	pr_info("blk_account_io_start() before\n");
-
-	printk(KERN_INFO "Loading Module\n");
-	printk("The process id is %d\n", (int) task_pid_nr(current));
-	printk("The process vid is %d\n", (int) task_pid_vnr(current));
-	printk("The process name is %s\n", current->comm);
-	printk("The process group is %d\n", (int) task_tgid_nr(current));
-	printk("\n\n");
-
-	ret = real_blk_account_io_start(regs);
-
-	pr_info("blk_account_io_start() after: %ld\n", ret);
-
-	return ret;
-}
-
-#else
-
 static asmlinkage void (*real_blk_account_io_start)(struct request *rq);
 
 static asmlinkage void fh_blk_account_io_start(struct request *rq)
 {
 	struct gendisk *rq_disk;
 	rq_disk = rq->rq_disk;
-	pr_info("blk_account_io_start() before\n");
-	printk(KERN_INFO "Loading Module\n");
-	printk("The process id is %d\n", (int) task_pid_nr(current));
-	printk("The process vid is %d\n", (int) task_pid_vnr(current));
-	printk("The process name is %s\n", current->comm);
-	printk("The process group is %d\n", (int) task_tgid_nr(current));
-	rq->write_hint = 2;
-	printk("Writing to new Disk name: %s", rq_disk->disk_name);
-	printk("What we set for write_hint: %d", rq->write_hint);
+	printwmodname("blk_account_io_start() before\n");
+	printdbg(KERN_INFO "Loading Module\n");
+	printdbg("The process id is %d\n", (int) task_pid_nr(current));
+	printdbg("The process vid is %d\n", (int) task_pid_vnr(current));
+	printdbg("The process group is %d\n", (int) task_tgid_nr(current));
+	rq->write_hint = find_stream(current->comm);
+	printdbg("Writing to new Disk name: %s", rq_disk->disk_name);
+	printdbg("Process name: %s, write_hint: %d, sector: %#llx, data_len: %#x\n", current->comm, rq->write_hint, rq->__sector, rq->__data_len);
 	real_blk_account_io_start(rq);
-	pr_info("blk_account_io_start() after\n\n");
+	printwmodname("blk_account_io_start() after\n\n");
 }
-
-
-
-static asmlinkage int (*real_nvme_submit_io)(struct nvme_ns *ns, struct nvme_user_io __user *uio);
-
-static asmlinkage int fh_nvme_submit_io(struct nvme_ns *ns, struct nvme_user_io __user *uio)
-{
-	struct gendisk *rq_disk;
-	uint8_t  dtype;
-	uint16_t dspec;
-	int ret;
-
-
-	rq_disk = ns->disk;
-	pr_info("nvme_submit_io() before\n");
-	printk(KERN_INFO "Loading Module\n");
-	printk("The process id is %d\n", (int) task_pid_nr(current));
-	printk("The process vid is %d\n", (int) task_pid_vnr(current));
-	printk("The process name is %s\n", current->comm);
-	printk("The process group is %d\n", (int) task_tgid_nr(current));
-	printk("Writing to new Disk name: %s", rq_disk->disk_name);
-	printk("control: %d", uio->control);
-	printk("dsmgmt: %d", uio->dsmgmt);
-	dtype = (uio->control >> 4) & 0xF;
-    dspec = (uio->dsmgmt >> 16) & 0xFFFF;
-	printk("dtype: %d", dtype);
-	printk("dsmgmt: %d", dspec);
-	ret = real_nvme_submit_io(ns, uio);
-	pr_info("nvme_submit_io() after\n\n");
-	return ret;
-}
-
-
-
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,13,0)
 static asmlinkage blk_status_t (*real_nvme_setup_cmd)(struct nvme_ns *ns, struct request *req, struct nvme_command *cmd);
@@ -327,52 +384,24 @@ static asmlinkage blk_status_t fh_nvme_setup_cmd(struct nvme_ns *ns, struct requ
 	blk_status_t ret;
 	struct gendisk *rq_disk;
 	rq_disk = req->rq_disk;
-	pr_info("nvme_setup_cmd() before\n");
-	printk(KERN_INFO "Loading Module\n");
-	printk("The process id is %d\n", (int) task_pid_nr(current));
-	printk("The process vid is %d\n", (int) task_pid_vnr(current));
-	printk("The process name is %s\n", current->comm);
-	printk("The process group is %d\n", (int) task_tgid_nr(current));
-	printk("What can we get from write_hint: %d", req->write_hint);
+	printwmodname("nvme_setup_cmd() before\n");
+	printdbg(KERN_INFO "Loading Module\n");
+	printdbg("The process id is %d\n", (int) task_pid_nr(current));
+	printdbg("The process vid is %d\n", (int) task_pid_vnr(current));
+	printdbg("The process name is %s\n", current->comm);
+	printdbg("The process group is %d\n", (int) task_tgid_nr(current));
+	printdbg("Process name: %s, write_hint: %d, sector: %#llx, data_len: %#x\n", current->comm, req->write_hint, req->__sector, req->__data_len);
+	//printdbg("What can we get from write_hint: %d", req->write_hint);
 	#if LINUX_VERSION_CODE < KERNEL_VERSION(5,13,0)
 	ret = real_nvme_setup_cmd(ns, req, cmd);
 	#else
 	ret = real_nvme_setup_cmd(ns, req);
 	#endif
-	pr_info("nvme_setup_cmd() after\n");
+	printwmodname("nvme_setup_cmd() after\n");
 	return ret;
 }
 
-#endif
-
-/*
-
-static char *duplicate_filename(const char __user *filename)
-{
-	char *kernel_filename;
-
-	kernel_filename = kmalloc(4096, GFP_KERNEL);
-	if (!kernel_filename)
-		return NULL;
-
-	if (strncpy_from_user(kernel_filename, filename, 4096) < 0) {
-		kfree(kernel_filename);
-		return NULL;
-	}
-
-	return kernel_filename;
-}
-*/
-
-/*
- * x86_64 kernels have a special naming convention for syscall entry points in newer kernels.
- * That's what you end up with if an architecture has 3 (three) ABIs for system calls.
- */
-#ifdef PTREGS_SYSCALL_STUBS
-#define SYSCALL_NAME(name) ("__x64_" name)
-#else
 #define SYSCALL_NAME(name) (name)
-#endif
 
 #define HOOK(_name, _function, _original)	\
 	{					\
@@ -382,10 +411,8 @@ static char *duplicate_filename(const char __user *filename)
 	}
 
 static struct ftrace_hook demo_hooks[] = {
-	HOOK("nvme_submit_io",  fh_nvme_submit_io,  &real_nvme_submit_io),
 	HOOK("nvme_setup_cmd",  fh_nvme_setup_cmd,  &real_nvme_setup_cmd),
 	HOOK("blk_account_io_start",  fh_blk_account_io_start,  &real_blk_account_io_start),
-	
 };
 
 static int fh_init(void)
@@ -396,7 +423,7 @@ static int fh_init(void)
 	if (err)
 		return err;
 
-	pr_info("module loaded\n");
+	printwmodname("module loaded\n");
 
 	return 0;
 }
@@ -406,6 +433,6 @@ static void fh_exit(void)
 {
 	fh_remove_hooks(demo_hooks, ARRAY_SIZE(demo_hooks));
 
-	pr_info("module unloaded\n");
+	printwmodname("module unloaded\n");
 }
 module_exit(fh_exit);
