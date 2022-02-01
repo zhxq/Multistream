@@ -25,14 +25,14 @@
 
 #ifdef DEBUG_MODULE
 #define printdbg(fmt, ...) \
-    do { printk(fmt, ## __VA_ARGS__); } while (0)
+	do { printk(fmt, ## __VA_ARGS__); } while (0)
 #define printwmodname(fmt, ...) \
-    do { pr_info(fmt, ## __VA_ARGS__); } while (0)
+	do { pr_info(fmt, ## __VA_ARGS__); } while (0)
 #else
 #define printdbg(fmt, ...) \
-    do { } while (0)
+	do { } while (0)
 #define printwmodname(fmt, ...) \
-    do { } while (0)
+	do { } while (0)
 #endif
 
 MODULE_DESCRIPTION("Block IO Stream ID Tagger");
@@ -50,14 +50,14 @@ static char*** streamlist = NULL;
 
 static int streams_set(const char *oldval, const struct kernel_param *kp)
 {
-    char* val;
+	char* val;
 	int i;
 	int j;
 	int streamc = 1;
 	int processes = 1;
-    val = kmalloc(strlen(oldval) + 1, GFP_KERNEL);
+	val = kmalloc(strlen(oldval) + 1, GFP_KERNEL);
 	streams = kmalloc(strlen(oldval) + 1, GFP_KERNEL);
-    strcpy(val, oldval);
+	strcpy(val, oldval);
 	strcpy(streams, oldval);
 	for (i = 0; i < arg_streams; i++){
 		for (j = 0; j < arg_stream_processes[i]; j++){
@@ -70,8 +70,8 @@ static int streams_set(const char *oldval, const struct kernel_param *kp)
 
 	char* tmpstream = val;
 	char* tmpprocess;
-    char* tmpstream_r = val;
-    char* tmpprocess_r;
+	char* tmpstream_r = val;
+	char* tmpprocess_r;
 
 	// count how many streams we need here
 	for (i = 0; val[i] != '\0'; i++){
@@ -80,13 +80,13 @@ static int streams_set(const char *oldval, const struct kernel_param *kp)
 		}
 	}
 	streamlist = kmalloc_array(streamc, sizeof(char**), GFP_KERNEL);
-    arg_streams = streamc;
-    arg_stream_processes = kmalloc(sizeof(int) * streamc, GFP_KERNEL);
+	arg_streams = streamc;
+	arg_stream_processes = kmalloc(sizeof(int) * streamc, GFP_KERNEL);
 
 	streamc = 0;
 	while ((tmpstream = strsep(&tmpstream_r, ";"))) {
-        printdbg("Stream: %d\n", streamc + 1);
-        printdbg("Info: %s\n", tmpstream);
+		printdbg("Stream: %d\n", streamc + 1);
+		printdbg("Info: %s\n", tmpstream);
 		processes = 1;
 		for (i = 0; tmpstream[i] != '\0'; i++){
 			if (tmpstream[i] == ','){
@@ -94,13 +94,13 @@ static int streams_set(const char *oldval, const struct kernel_param *kp)
 			}
 		}
 		streamlist[streamc] = kmalloc_array(processes, sizeof(char*), GFP_KERNEL);
-        arg_stream_processes[streamc] = processes;
+		arg_stream_processes[streamc] = processes;
 		processes = 0;
 		tmpprocess = tmpstream;
 		tmpprocess_r = tmpstream;
 		while ((tmpprocess = strsep(&tmpprocess_r, ","))) {
-            printdbg("  Process: %d\n", processes + 1);
-            printdbg("  Name: %s\n", tmpprocess);
+			printdbg("  Process: %d\n", processes + 1);
+			printdbg("  Name: %s\n", tmpprocess);
 			streamlist[streamc][processes] = kmalloc(strlen(tmpprocess) + 1, GFP_KERNEL);
 			strcpy(streamlist[streamc][processes], tmpprocess);
 			processes++;
@@ -113,19 +113,19 @@ static int streams_set(const char *oldval, const struct kernel_param *kp)
 
 // Find stream ID by process name
 static int find_stream(const char* process_name){
-    int i, j;
-    printdbg("Total streams: %d\n", arg_streams);
-    printdbg("Finding %s\n", process_name);
-    for (i = 0; i < arg_streams; i++){
-        printdbg("Stream %d has %d processes\n", i + 2, arg_stream_processes[i]);
-        for (j = 0; j < arg_stream_processes[i]; j++){
-            printdbg("  Comparing to: %s\n", streamlist[i][j]);
-            if (strcmp(streamlist[i][j], process_name) == 0){
-                return i + 2;
-            }
-        }
-    }
-    return 0;
+	int i, j;
+	printdbg("Total streams: %d\n", arg_streams);
+	printdbg("Finding %s\n", process_name);
+	for (i = 0; i < arg_streams; i++){
+		printdbg("Stream %d has %d processes\n", i + 2, arg_stream_processes[i]);
+		for (j = 0; j < arg_stream_processes[i]; j++){
+			printdbg("  Comparing to: %s\n", streamlist[i][j]);
+			if (strcmp(streamlist[i][j], process_name) == 0){
+				return i + 2;
+			}
+		}
+	}
+	return 0;
 }
  
 static int stream_get(char* buffer, const struct kernel_param *kp){
@@ -262,8 +262,8 @@ int fh_install_hook(struct ftrace_hook *hook)
 	 */
 	hook->ops.func = fh_ftrace_thunk;
 	hook->ops.flags = FTRACE_OPS_FL_SAVE_REGS
-	                | FTRACE_OPS_FL_RECURSION
-	                | FTRACE_OPS_FL_IPMODIFY;
+					| FTRACE_OPS_FL_RECURSION
+					| FTRACE_OPS_FL_IPMODIFY;
 
 	err = ftrace_set_filter_ip(&hook->ops, hook->address, 0, 0);
 	if (err) {
