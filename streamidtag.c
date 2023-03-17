@@ -366,7 +366,11 @@ static asmlinkage void fh_blk_account_io_start(struct request *rq)
 	printdbg("The process id is %d\n", (int) task_pid_nr(current));
 	printdbg("The process vid is %d\n", (int) task_pid_vnr(current));
 	printdbg("The process group is %d\n", (int) task_tgid_nr(current));
-	rq->write_hint = find_stream(current->comm);
+	if (req_op(rq) == REQ_OP_WRITE){
+		if (rq->write_hint == 0){
+			rq->write_hint = find_stream(current->comm);
+		}
+	}
 	printdbg("Writing to new Disk name: %s", rq_disk->disk_name);
 	printdbg("Process name: %s, write_hint: %d, sector: %#llx, data_len: %#x\n", current->comm, rq->write_hint, rq->__sector, rq->__data_len);
 	real_blk_account_io_start(rq);
@@ -383,7 +387,15 @@ static asmlinkage blk_status_t fh_nvme_setup_cmd(struct nvme_ns *ns, struct requ
 {
 	blk_status_t ret;
 	struct gendisk *rq_disk;
+	char* disk_name;
+	struct nvme_ctrl *ctrl;
 	rq_disk = req->rq_disk;
+	
+	if (req_op(req) == REQ_OP_WRITE){
+		disk_name = rq_disk->disk_name;
+		ctrl = ns->ctrl;
+		ctrl->nr_streams = 17;
+	}
 	printwmodname("nvme_setup_cmd() before\n");
 	printdbg(KERN_INFO "Loading Module\n");
 	printdbg("The process id is %d\n", (int) task_pid_nr(current));
