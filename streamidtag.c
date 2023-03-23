@@ -2,7 +2,7 @@
  * Adapted from https://github.com/ilammy/ftrace-hook for hook management part.
  */
 
-#define pr_fmt(fmt) "ftrace_hook: " fmt
+#define pr_fmt(fmt) "Multi-stream: " fmt
 
 #include <linux/ftrace.h>
 #include <linux/kallsyms.h>
@@ -18,10 +18,19 @@
 #include <linux/nvme_ioctl.h>
 #include <linux/nvme.h>
 #include <linux/moduleparam.h>
+#include <linux/hashtable.h>
 #include "nvme.h"
 
+#define HASHTABLE_BITS 16
+
+struct process_name {
+	char* pname;
+	struct request* req;
+	struct hlist_node node;
+};
+
 // Uncomment the following line to enable logging to dmesg.
-//#define DEBUG_MODULE
+// #define DEBUG_MODULE
 
 #ifdef DEBUG_MODULE
 #define printdbg(fmt, ...) \
@@ -47,6 +56,7 @@ static char* streams = NULL;
 static int arg_streams = 0;
 static int* arg_stream_processes;
 static char*** streamlist = NULL;
+DEFINE_HASHTABLE(requests, HASHTABLE_BITS);
 
 static int streams_set(const char *oldval, const struct kernel_param *kp)
 {
@@ -55,6 +65,7 @@ static int streams_set(const char *oldval, const struct kernel_param *kp)
 	int j;
 	int streamc = 1;
 	int processes = 1;
+	hash_init(requests);
 	val = kmalloc(strlen(oldval) + 1, GFP_KERNEL);
 	streams = kmalloc(strlen(oldval) + 1, GFP_KERNEL);
 	strcpy(val, oldval);
@@ -359,22 +370,49 @@ static asmlinkage void (*real_blk_account_io_start)(struct request *rq);
 
 static asmlinkage void fh_blk_account_io_start(struct request *rq)
 {
-	struct gendisk *rq_disk;
-	rq_disk = rq->rq_disk;
 	printwmodname("blk_account_io_start() before\n");
 	printdbg(KERN_INFO "Loading Module\n");
+	struct process_name *p;
+	if (req_op(rq) == REQ_OP_WRITE){
+		p = kmalloc(sizeof(struct process_name), GFP_KERNEL);
+		p->pname = kmalloc(strlen(current->comm) + 1, GFP_KERNEL);
+		strcpy(p->pname, current->comm);
+		p->req = rq;
+		hash_add(requests, &p->node, (long)rq);
+	}
 	printdbg("The process id is %d\n", (int) task_pid_nr(current));
 	printdbg("The process vid is %d\n", (int) task_pid_vnr(current));
 	printdbg("The process group is %d\n", (int) task_tgid_nr(current));
-	if (req_op(rq) == REQ_OP_WRITE){
-		if (rq->write_hint == 0){
-			rq->write_hint = find_stream(current->comm);
-		}
-	}
-	printdbg("Writing to new Disk name: %s", rq_disk->disk_name);
+	printdbg("Writing to new Disk name: %s", rq->rq_disk->disk_name);
 	printdbg("Process name: %s, write_hint: %d, sector: %#llx, data_len: %#x\n", current->comm, rq->write_hint, rq->__sector, rq->__data_len);
 	real_blk_account_io_start(rq);
 	printwmodname("blk_account_io_start() after\n\n");
+}
+
+static asmlinkage void (*real_blk_account_io_done)(struct request *rq, u64 now);
+
+static asmlinkage void fh_blk_account_io_done(struct request *rq, u64 now)
+{
+	printwmodname("blk_account_io_done() before\n");
+	printdbg(KERN_INFO "Loading Module\n");
+	printdbg("Removing proc entry in disk: %s", rq->rq_disk->disk_name);
+	
+	struct process_name *p;
+	struct hlist_node *tmp_node;
+	if (req_op(rq) == REQ_OP_WRITE){
+		hash_for_each_possible_safe(requests, p, tmp_node, node, (long)rq){
+			if (virt_addr_valid(p)){
+				printdbg("Process name: %s, write_hint: %d, sector: %#llx, data_len: %#x\n", p->pname, rq->write_hint, rq->__sector, rq->__data_len);
+				if (p->req == rq){
+					hash_del(&p->node);
+					kfree(p);
+				}
+			}
+		}
+	}
+	
+	real_blk_account_io_done(rq, now);
+	printwmodname("blk_account_io_done() after\n\n");
 }
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,13,0)
@@ -390,19 +428,31 @@ static asmlinkage blk_status_t fh_nvme_setup_cmd(struct nvme_ns *ns, struct requ
 	char* disk_name;
 	struct nvme_ctrl *ctrl;
 	rq_disk = req->rq_disk;
-	
-	if (req_op(req) == REQ_OP_WRITE){
-		disk_name = rq_disk->disk_name;
-		ctrl = ns->ctrl;
-		ctrl->nr_streams = 17;
-	}
 	printwmodname("nvme_setup_cmd() before\n");
 	printdbg(KERN_INFO "Loading Module\n");
 	printdbg("The process id is %d\n", (int) task_pid_nr(current));
 	printdbg("The process vid is %d\n", (int) task_pid_vnr(current));
 	printdbg("The process name is %s\n", current->comm);
 	printdbg("The process group is %d\n", (int) task_tgid_nr(current));
-	printdbg("Process name: %s, write_hint: %d, sector: %#llx, data_len: %#x\n", current->comm, req->write_hint, req->__sector, req->__data_len);
+	
+	struct process_name *p = NULL;
+	struct hlist_node *tmp_node;
+	if (req_op(req) == REQ_OP_WRITE){
+		disk_name = rq_disk->disk_name;
+		ctrl = ns->ctrl;
+		ctrl->nr_streams = 17;
+		if (req->write_hint == 0){
+			hash_for_each_possible_safe(requests, p, tmp_node, node, (long)req){
+				if (virt_addr_valid(p)){
+					if (p->req == req){
+						printdbg("Process name: %s, write_hint: %d, sector: %#llx, data_len: %#x\n", p->pname, req->write_hint, req->__sector, req->__data_len);
+						req->write_hint = find_stream(p->pname);
+					}
+				}
+			}
+		}
+	}
+	
 	//printdbg("What can we get from write_hint: %d", req->write_hint);
 	#if LINUX_VERSION_CODE < KERNEL_VERSION(5,13,0)
 	ret = real_nvme_setup_cmd(ns, req, cmd);
@@ -425,6 +475,7 @@ static asmlinkage blk_status_t fh_nvme_setup_cmd(struct nvme_ns *ns, struct requ
 static struct ftrace_hook demo_hooks[] = {
 	HOOK("nvme_setup_cmd",  fh_nvme_setup_cmd,  &real_nvme_setup_cmd),
 	HOOK("blk_account_io_start",  fh_blk_account_io_start,  &real_blk_account_io_start),
+	HOOK("blk_account_io_done",  fh_blk_account_io_done,  &real_blk_account_io_done),
 };
 
 static int fh_init(void)
