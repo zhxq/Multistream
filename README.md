@@ -1,5 +1,5 @@
 # BlockIOStreamTagger
-A kernel module to tag stream ID to Linux block I/O requests. 
+A kernel module to tag stream ID to Linux block I/O requests based on Multi-stream. However, please be aware that Multi-stream is removed from Linux kernel since v5.18.
 
 To compile and install this module as a Linux Kernel module, just run `make`. 
 
@@ -27,7 +27,7 @@ The kernel module accepts a parameter, namely "streams", as a list of processes 
 
 In this example, it will set parameter `streams` of module `streamidtag` to "a;b,c;d,e,f", which asks the kernel module to assign all write requests by process `a` to stream 2, all write requests by process `b` and `c` to stream 3, and `d`, `e`, `f` to stream 4. Stream 5 has no process assigned. 
 
-You can add **at most four streams**, as Linux Kernel supports at most four streams. Stream ID in Linux starts from 2, so the **streams ranges from 2 to 5**. FYI, stream 0 is WRITE_LIFE_NOT_SET and stream 1 is WRITE_LIFE_NONE, and they will both be passed as 0 to the SSD - other stream numbers will decrease by 1 (ref: https://elixir.bootlin.com/linux/latest/source/drivers/nvme/host/core.c#L801).
+You can add **at most 16 streams**. Linux Kernel supports at most four streams, but the Multi-stream feature supports more streams as defined in the NVMe protocol. This kernel module circumvents the limit given by the kernel by setting the `ctrl->nr_streams` to 17. Stream ID in Linux starts from 2, so the **streams ranges from 2 to 17**. FYI, stream 0 is WRITE_LIFE_NOT_SET and stream 1 is WRITE_LIFE_NONE, and they will both be passed as 0 to the SSD - other stream numbers will decrease by 1 (ref: see drivers/nvme/host/core.c).
 
 Similarly, ";;d,e,f;" means assign all write requests by `d`, `e`, `f` to stream 4, and do not assign any write requests by any processes to stream 2, 3, or 5.
 
