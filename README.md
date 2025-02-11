@@ -1,9 +1,13 @@
-# BlockIOStreamTagger
+# Multistream SSD Tagger
 A kernel module to tag stream ID to Linux block I/O requests based on Multi-stream. However, please be aware that Multi-stream is removed from Linux kernel since v5.18.
 
 To compile and install this module as a Linux Kernel module, just run `make`. 
 
 Before loading the kernel module, please check if your SSD supports stream and your OS has enabled stream capability as described in the first two sections of this README. For the usage of the kernel module, see "**Enable the Kernel Module and Assign Processes to Them**" and "**Change Kernel Module Parameters On-the-fly**".
+
+If you are looking for an implementation for AutoStream, see https://github.com/zhxq/AutoStream.
+
+This kernel module is used for evaluating the paper _Excessive SSD-Internal Parallelism Considered Harmful_ (https://dl.acm.org/doi/abs/10.1145/3599691.3603412). Please consider citing our paper if you use this kernel module in your paper. Thank you!
 
 ## Check directory setting
 `sudo nvme dir-receive /dev/nvme0n1 -D 1 -O 1 -H`
